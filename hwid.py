@@ -4,21 +4,6 @@ from base64 import b64decode, b64encode
 from hashlib import sha256
 from winreg import HKEY_LOCAL_MACHINE, OpenKey, QueryValueEx
 
-GENERIC_PRODUCT_KEY = "W269N-WFGWX-YVC9B-4J6C9-T83GX"  # https://docs.microsoft.com/en-us/windows-server/get-started/kms-client-activation-keys
-
-BLOB_HEADER = 0x0602000000A40000525341310008000001000100.to_bytes(20, "big")
-
-# (private_key, public_key) Can be found by reverse engineering the whiteboxes in gatherosstate.exe and ClipUp.exe.
-# CLIPUP_KEY = (
-#     0x0,
-#     0x0,
-# )
-# GATHEROSSTATE_KEY = (
-#     0x0,
-#     0x0,
-# )
-# TODO: Add clientLockboxKey
-
 
 def get_hwid_from_session_id(session_id):
     hwid_b64 = [i[5:] for i in session_id.split(";") if "Hwid" in i][0]
@@ -48,8 +33,9 @@ def get_hwid_from_clipup():
     """Needs admin access, uses ClipUp to generate a license from a BIOS key.
     Manually use a generic key to make it work without actually having a valid bios license
     Returns the binary HWID"""
-    print("Running clipup")
-    os.system(f"ClipUp -v -d -k {GENERIC_PRODUCT_KEY} .")
+    os.system(
+        "ClipUp -v -d -k W269N-WFGWX-YVC9B-4J6C9-T83GX ."
+    )  # https://docs.microsoft.com/en-us/windows-server/get-started/kms-client-activation-keys
     if files := os.listdir("Migration"):
         with open(f"Migration/{files[0]}") as f:
             hwid = get_hwid_from_license_xml(f.read())
@@ -67,10 +53,8 @@ def get_pfn():
     return QueryValueEx(key, "OSProductPfn")[0]
 
 
-def create_properties(
-    hwid, pfn, OSMajorVersion="10", timestamp="TimeStampClient=0000-00-00T00:00:00Z"
-):
-    session_id_str = f"OSMajorVersion={OSMajorVersion};Hwid={b64encode(hwid).decode()};Pfn={pfn};DownlevelGenuineState=1;"
+def create_properties(hwid, pfn, OSMajorVersion=0, timestamp="TimeStampClient=0-0-0"):
+    session_id_str = f"Hwid={b64encode(hwid).decode()};Pfn={pfn};OSMajorVersion={OSMajorVersion};DownlevelGenuineState=1;\0"
     return (
         "SessionId="
         + b64encode(session_id_str.encode("utf-16-le")).decode()
@@ -85,7 +69,10 @@ def sign_properties(properties, key):
 
 
 def raw_to_blob_str(public_key):
-    return b64encode(BLOB_HEADER + public_key.to_bytes(256, "little")).decode()
+    return b64encode(
+        0x0602000000A40000525341310008000001000100.to_bytes(20, "big")
+        + public_key.to_bytes(256, "little")
+    ).decode()
 
 
 def create_xml(properties_string, key):
@@ -123,10 +110,28 @@ def create_xml(properties_string, key):
 
     root.append(genuine_properties)
 
-    return (
-        "<?xml version='1.0' encoding='utf-8'?>"
-        + ET.tostring(root, method="xml").decode()
-    )
+    return "<?xml version='1.0'?>" + ET.tostring(root, method="xml").decode()
+
+
+def key_from_string(line):
+    line = line.strip()
+    parts = line.split(";")
+    if len(parts) == 1:
+        key_id = None
+    else:
+        key_id = parts[1]
+    keypart = parts[0].split(",")
+    key = (int(keypart[0], 16), int(keypart[1], 16))
+    return key_id, key
+
+
+def keys_from_file(keyfile):
+    keys = {}
+    with open(keyfile) as f:
+        for line in f.readlines():
+            (key_id, key) = key_from_string(line)
+            keys[key_id] = key
+    return keys
 
 
 def activate(key, hwid=None, pfn=None):
@@ -141,16 +146,18 @@ def activate(key, hwid=None, pfn=None):
         "w",
     ) as f:
         f.write(ticket)
-    print("activating")
     os.system("ClipUp -v -o -altto .")
     return os.system(f"cscript {os.getenv('SYSTEMROOT')}\System32\slmgr.vbs /ato")
 
 
 if __name__ == "__main__":
     try:
-        from keys import CLIPUP_KEY, GATHEROSSTATE_KEY
-    except ImportError:
-        print("You need to create a keys.py file!")
+        keys = keys_from_file("keys.txt")
+        key = keys.get("GATHEROSSTATE_KEY")
+        if not key:
+            key = keys.popitem()[1]
+    except FileNotFoundError:
+        print("Create a keys.txt file with the correct key(s)")
         raise
-    if activate(GATHEROSSTATE_KEY):
-        raise RuntimeError("Failed to activate system!")
+    if activate(key):
+        raise RuntimeError("Failed to activate system")

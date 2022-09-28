@@ -129,4 +129,4 @@ dmypy.json
 .pyre/
 
 # Keys
-keys.py
+keys.txt
